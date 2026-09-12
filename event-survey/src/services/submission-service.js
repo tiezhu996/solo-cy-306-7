@@ -30,10 +30,9 @@ function normalizeAnswer(question, raw) {
     return { questionId: question.id, value: value || null };
   }
 
-  // multi
+  // multi：答案只能是数组；数组中每个选项都必须存在；空数组对选填题按未作答处理。
   if (!Array.isArray(raw)) {
-    if (question.required) throw new HttpError(400, 'ANSWER_REQUIRED', `「${question.title}」为必填项`);
-    return { questionId: question.id, value: [] };
+    throw new HttpError(400, 'INVALID_ANSWER_FORMAT', `「${question.title}」多选题答案必须是数组`);
   }
   const values = raw.map(String);
   if (values.some((v) => !optionIds.has(v))) {

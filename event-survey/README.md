@@ -61,6 +61,7 @@ PORT=8080 HOST=127.0.0.1 DATA_DIR=/var/lib/event-survey npm start
 | 未报名用户提交问卷 | `403 NOT_REGISTERED` |
 | 同一用户第二次提交 | `409 ALREADY_SUBMITTED` |
 | 必答题未作答 / 选择不存在的选项 | `400 ANSWER_REQUIRED / INVALID_OPTION` |
+| 多选题答案不是数组（如误传字符串） | `400 INVALID_ANSWER_FORMAT`（空数组对选填题按未作答处理） |
 | 参与者调用组织者接口（建活动/发布/看结果） | `403 FORBIDDEN` |
 | 活动发布后修改问卷题目 | `409 EVENT_ALREADY_PUBLISHED`（题目锁定） |
 

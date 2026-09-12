@@ -432,7 +432,31 @@ group('T5 必填与非法选项校验', async (w, check) => {
   check('必填多选传空数组返回 400', r.status === 400 && r.json.code === 'ANSWER_REQUIRED', r.text);
 
   r = await submit({ [qSingle.id]: qSingle.options[0].id, [qMultiReq.id]: 'P', [qTextReq.id]: 'x' });
-  check('必填多选传非数组返回 400', r.status === 400 && r.json.code === 'ANSWER_REQUIRED', r.text);
+  check('必填多选传非数组（字符串）返回 400 INVALID_ANSWER_FORMAT',
+    r.status === 400 && r.json.code === 'INVALID_ANSWER_FORMAT', r.text);
+
+  // 选填多选题：非数组一律拒绝（修复前会被静默当成未作答保存）
+  const validBase = {
+    [qSingle.id]: qSingle.options[0].id,
+    [qMultiReq.id]: [qMultiReq.options[0].id],
+    [qTextReq.id]: 'x',
+  };
+  for (const bad of [
+    { label: '字符串（合法选项 id）', value: qMultiOpt.options[0].id },
+    { label: '字符串（非法选项）', value: 'opt_not_exist' },
+    { label: '数字', value: 42 },
+    { label: '对象', value: { x: 1 } },
+    { label: 'null', value: null },
+  ]) {
+    r = await submit({ ...validBase, [qMultiOpt.id]: bad.value });
+    check(`选填多选传${bad.label}返回 400 INVALID_ANSWER_FORMAT`,
+      r.status === 400 && r.json.code === 'INVALID_ANSWER_FORMAT', `${r.status} ${r.text}`);
+  }
+
+  // 选填多选：数组中含非法选项同样拒绝（修复前字符串分支绕过了选项校验）
+  r = await submit({ ...validBase, [qMultiOpt.id]: [qMultiOpt.options[0].id, 'opt_fake'] });
+  check('选填多选数组混入非法选项返回 400 INVALID_OPTION',
+    r.status === 400 && r.json.code === 'INVALID_OPTION', r.text);
 
   r = await submit({ [qSingle.id]: qSingle.options[0].id, [qMultiReq.id]: [qMultiReq.options[0].id], [qTextReq.id]: '   ' });
   check('必填文本传空白返回 400', r.status === 400 && r.json.code === 'ANSWER_REQUIRED', r.text);
@@ -456,17 +480,21 @@ group('T5 必填与非法选项校验', async (w, check) => {
   check('文本答案超过 2000 字返回 400 ANSWER_TOO_LONG',
     r.status === 400 && r.json.code === 'ANSWER_TOO_LONG', r.text);
 
-  // 合法提交：可选项整题省略
+  // 合法提交：可选项整题省略；同时显式给选填多选传空数组（仍按未作答处理）
   r = await submit({
     [qSingle.id]: qSingle.options[1].id,
+    [qMultiOpt.id]: [],
     [qMultiReq.id]: [qMultiReq.options[1].id],
     [qTextReq.id]: '合法回答',
   });
-  check('可选项全部省略时提交成功', r.status === 200, r.text);
+  check('可选项省略 + 选填多选空数组时提交成功', r.status === 200, r.text);
 
   // 被拒绝的脏答案没有产生部分提交
-  check('校验失败未产生多余提交（提交人数 1）',
-    (await w.call('GET', `/api/events/${eventId}/results`, { token: org.token })).json.data.submissionCount === 1);
+  const finalBoard = (await w.call('GET', `/api/events/${eventId}/results`, { token: org.token })).json.data;
+  check('校验失败未产生多余提交（提交人数 1）', finalBoard.submissionCount === 1);
+  const optionalMulti = finalBoard.questions[1];
+  check('选填多选空数组按未作答保存（作答人数 0、各选项 0）',
+    optionalMulti.answeredCount === 0 && optionalMulti.options.every((o) => o.count === 0));
 
   // 问卷建模校验
   const model = (payload, token = org.token) => w.call('POST', '/api/events', { token, body: payload });
