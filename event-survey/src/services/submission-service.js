@@ -177,4 +177,64 @@ function getResults(organizer, eventId) {
   };
 }
 
-module.exports = { submitSurvey, mySubmission, getResults };
+// 导出单活动提交明细。每条提交一行（CSV）/一个对象（JSON）：
+// 提交时间、提交人、每道题的答案；多选答案合并为分号分隔文本，文本答案原样保留。
+// 无提交时返回带 empty:true 的可识别空结果（CSV 仍只含表头行）。
+function buildExport(organizer, eventId) {
+  const event = store.find('events', (e) => e.id === eventId);
+  if (!event) throw new HttpError(404, 'EVENT_NOT_FOUND', '活动不存在');
+  requireOwner(event, organizer);
+
+  const submissions = store
+    .filter('submissions', (s) => s.eventId === eventId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  const optionLabel = new Map();
+  for (const q of event.questions) {
+    if (q.options) for (const o of q.options) optionLabel.set(o.id, o.label);
+  }
+
+  // 单题答案转显示文本：单选=选项文本；多选=选项文本以「; 」合并；文本原样。
+  const answerText = (q, value) => {
+    if (q.type === 'single') return value ? (optionLabel.get(value) || value) : '';
+    if (q.type === 'multi') return Array.isArray(value) ? value.map((v) => optionLabel.get(v) || v).join('; ') : '';
+    return value || '';
+  };
+
+  const rows = submissions.map((s) => {
+    const user = store.find('users', (u) => u.id === s.userId);
+    const answers = event.questions.map((q) => {
+      const a = s.answers.find((x) => x.questionId === q.id);
+      const value = a ? a.value : (q.type === 'multi' ? [] : null);
+      return {
+        questionId: q.id,
+        title: q.title,
+        type: q.type,
+        // value 保留结构化原始答案（单选 id / 多选 id 数组 / 文本字符串）
+        value: a ? a.value : (q.type === 'multi' ? [] : null),
+        // text 为展示用文本：多选合并、文本原样
+        text: answerText(q, value),
+      };
+    });
+    return {
+      submissionId: s.id,
+      submittedAt: s.createdAt,
+      userId: s.userId,
+      nickname: user ? user.nickname : '未知用户',
+      answers,
+    };
+  });
+
+  return {
+    empty: rows.length === 0,
+    count: rows.length,
+    exportedAt: now(),
+    event: { id: event.id, title: event.title, status: event.status },
+    questions: event.questions.map((q) => ({
+      questionId: q.id, title: q.title, type: q.type, required: q.required,
+    })),
+    submissions: rows,
+  };
+}
+
+module.exports = { submitSurvey, mySubmission, getResults, buildExport };

@@ -1,7 +1,8 @@
 'use strict';
 
 // 路由表：method + path 模式（:param 路径参数）。
-const { ok, readJsonBody, currentUser, requireUser, requireOrganizer } = require('./http-util');
+const { ok, sendCsv, readJsonBody, parse, currentUser, requireUser, requireOrganizer } = require('./http-util');
+const { toCsv } = require('./csv');
 const userService = require('./services/user-service');
 const eventService = require('./services/event-service');
 const registrationService = require('./services/registration-service');
@@ -111,11 +112,44 @@ route('POST', '/api/events/:id/submissions', async (req, res, p) => {
   ok(res, submissionService.submitSurvey(user, p.id, body), '提交成功');
 });
 
-// ---------- 组织者结果看板 ----------
+// ---------- 组织者结果看板与导出 ----------
 
 route('GET', '/api/events/:id/results', (req, res, p) => {
   const organizer = requireOrganizer(req);
   ok(res, submissionService.getResults(organizer, p.id));
+});
+
+// 导出提交明细：默认 JSON；?format=csv 或 Accept: text/csv 返回 CSV 文件
+route('GET', '/api/events/:id/export', (req, res, p) => {
+  const organizer = requireOrganizer(req);
+  const data = submissionService.buildExport(organizer, p.id);
+
+  const url = new URL(req.url, 'http://localhost');
+  const wantsCsv =
+    url.searchParams.get('format') === 'csv' ||
+    (req.headers.accept || '').includes('text/csv');
+
+  if (!wantsCsv) {
+    res.setHeader('X-Export-Empty', data.empty ? '1' : '0');
+    ok(res, data, data.empty ? '暂无提交，导出为空结果' : '导出成功');
+    return;
+  }
+
+  const header = ['提交时间', '提交人', '提交ID'];
+  for (const q of data.questions) header.push(q.title);
+  const rows = [header];
+  for (const s of data.submissions) {
+    const row = [s.submittedAt, s.nickname, s.submissionId];
+    for (const q of data.questions) {
+      const a = s.answers.find((x) => x.questionId === q.questionId);
+      row.push(a ? a.text : '');
+    }
+    rows.push(row);
+  }
+  res.setHeader('X-Export-Empty', data.empty ? '1' : '0');
+  res.setHeader('X-Export-Count', String(data.count));
+  const safeName = data.event.title.replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 60) || 'survey';
+  sendCsv(res, toCsv(rows), `${safeName}_提交明细.csv`);
 });
 
 async function dispatch(req, res, pathname) {

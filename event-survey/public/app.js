@@ -53,6 +53,31 @@ async function api(method, url, body) {
 
 function go(hash) { window.location.hash = hash; }
 
+// 带鉴权头下载导出文件：fetch 成 blob 后用 <a download> 触发浏览器保存。
+async function downloadExport(url, fallbackName) {
+  const res = await fetch(url, { headers: { ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}) } });
+  if (!res.ok) {
+    let msg = `导出失败（${res.status}）`;
+    try { msg = (await res.json()).message || msg; } catch { /* 非 JSON */ }
+    throw new Error(msg);
+  }
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const star = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  const plain = disposition.match(/filename="?([^";]+)"?/i);
+  const name = star ? decodeURIComponent(star[1]) : (plain ? plain[1] : fallbackName);
+  const blob = await res.blob();
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(href);
+  const empty = res.headers.get('X-Export-Empty') === '1';
+  return { empty, count: Number(res.headers.get('X-Export-Count') || 0) };
+}
+
 document.addEventListener('click', (e) => {
   const link = e.target.closest('[data-link]');
   if (link) {
@@ -590,7 +615,12 @@ async function pageResults(eventId) {
         <div class="stat-box"><div class="num">${r.submissionCount}</div><div class="lbl">问卷提交人数</div></div>
         <div class="stat-box"><div class="num">${r.registeredCount ? Math.round((r.submissionCount / r.registeredCount) * 100) : 0}%</div><div class="lbl">提交率</div></div>
       </div>
-      <a class="btn secondary small" data-link="#/organizer">返回列表</a>
+      <div class="row">
+        <a class="btn secondary small" data-link="#/organizer">返回列表</a>
+        <div class="spacer"></div>
+        <button class="secondary small" id="btn-export-csv">导出 CSV</button>
+        <button class="small" id="btn-export-json">导出 JSON</button>
+      </div>
     </div>
     ${r.questions.map((q) => `
       <div class="card">
@@ -614,6 +644,37 @@ async function pageResults(eventId) {
               </div>`;
             }).join('')}
       </div>`).join('')}`;
+
+  document.getElementById('btn-export-csv').onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      const { empty } = await downloadExport(`/api/events/${eventId}/export?format=csv`, 'submissions.csv');
+      toast(empty ? '暂无提交，已下载仅含表头的空表' : 'CSV 导出成功', empty ? 'error' : 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      e.target.disabled = false;
+    }
+  };
+  document.getElementById('btn-export-json').onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      // JSON 走统一 api 封装，便于识别 empty 字段
+      const data = await api('GET', `/api/events/${eventId}/export`);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = `${(data.event.title || 'survey').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 60)}_提交明细.json`;
+      a.click();
+      URL.revokeObjectURL(href);
+      toast(data.empty ? '暂无提交，导出为空结果' : `已导出 ${data.count} 条提交`, data.empty ? 'error' : 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      e.target.disabled = false;
+    }
+  };
 }
 
 // ---------- hash 路由 ----------

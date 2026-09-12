@@ -44,6 +44,15 @@ function fail(res, status, code, message) {
   sendJson(res, status, { code, message, data: null });
 }
 
+function sendCsv(res, csv, filename) {
+  res.writeHead(200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    'Content-Length': Buffer.byteLength(csv),
+  });
+  res.end(csv);
+}
+
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let raw = '';
@@ -122,4 +131,4 @@ function serveStatic(req, res, pathname) {
   return false;
 }
 
-module.exports = { HttpError, sendJson, ok, fail, readJsonBody, parse, currentUser, requireUser, requireOrganizer, serveStatic };
+module.exports = { HttpError, sendJson, sendCsv, ok, fail, readJsonBody, parse, currentUser, requireUser, requireOrganizer, serveStatic };

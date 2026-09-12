@@ -45,7 +45,7 @@ PORT=8080 HOST=127.0.0.1 DATA_DIR=/var/lib/event-survey npm start
 1. 注册/登录组织者账号 → 「＋ 新建活动问卷」
 2. 在编辑器中添加单选、多选、文本题，勾选必填，维护选项
 3. 保存为草稿（可反复改）→「保存并发布」；发布后问卷题目锁定
-4. 在「结果看板」查看报名人数、提交人数、提交率、每题选项人数分布条形图与文本答案列表
+4. 在「结果看板」查看报名人数、提交人数、提交率、每题选项人数分布条形图与文本答案列表，并可一键导出 CSV / JSON 提交明细
 
 **参与者**
 1. 注册/登录参与者账号 → 在「活动列表」查看已发布活动
@@ -102,8 +102,25 @@ PORT=8080 HOST=127.0.0.1 DATA_DIR=/var/lib/event-survey npm start
 | GET | /api/events/:id/my-submission | 参与者 | 报名/问卷开放/已提交状态 |
 | POST | /api/events/:id/submissions | 已报名参与者 | 提交问卷，body：`{ answers: { 题目id: 答案 } }`，每人一次 |
 | GET | /api/events/:id/results | 组织者（本人） | 结果看板数据 |
+| GET | /api/events/:id/export | 组织者（本人） | 导出提交明细，默认 JSON；`?format=csv` 或 `Accept: text/csv` 返回 CSV |
 
 答案格式：单选题传选项 id（字符串）；多选题传选项 id 数组；文本题传字符串。
+
+### 导出提交明细
+
+`GET /api/events/:id/export`（组织者本人）导出该活动全部提交明细，每条提交包含
+**提交时间、提交人、每道题的结构化答案（`value`）与展示文本（`text`）**：
+单选为选项文本；**多选以「; 」合并显示**；**文本答案原样保留**（含逗号、引号、换行）。
+
+- 默认返回 JSON：`{ empty, count, exportedAt, event, questions, submissions }`。
+  **无提交时 `empty: true`、`count: 0`、`submissions: []`**，同时响应头
+  `X-Export-Empty: 1`，调用方可明确识别空结果。
+- 加 `?format=csv`（或请求头 `Accept: text/csv`）返回 CSV 文件下载：
+  `Content-Type: text/csv; charset=utf-8`、`Content-Disposition: attachment`、
+  带 UTF-8 BOM（Excel 打开中文不乱码）、符合 RFC 4180 转义；无提交时文件**只含表头一行**。
+- 前端结果看板提供「导出 CSV」「导出 JSON」按钮（带鉴权头下载，空结果会提示）。
+- 导出为只读操作：不改变提交、统计与一次性约束；权限与结果看板一致
+  （未登录 401、非组织者/他人活动 403、活动不存在 404）。
 
 结果看板 `data` 结构：
 
@@ -128,7 +145,7 @@ PORT=8080 HOST=127.0.0.1 DATA_DIR=/var/lib/event-survey npm start
 ```bash
 npm test          # 冒烟测试 + 可重复测试套件（任一失败即非零退出）
 npm run test:smoke # 仅冒烟测试（test/smoke.js，60 项断言）
-npm run test:suite # 仅可重复测试套件（test/suite.js，8 组 104 项断言）
+npm run test:suite # 仅可重复测试套件（test/suite.js，9 组 151 项断言）
 ONLY=T7 npm run test:suite   # 按组名过滤，只跑某一组
 ```
 
@@ -146,6 +163,9 @@ ONLY=T7 npm run test:suite   # 按组名过滤，只跑某一组
   - **T7 重启回读**：状态/计数/分布/文本/一次性约束跨进程保持，草稿可继续编辑
   - **T8 异常中断**：垃圾 `.tmp` 残留不影响启动与写入；3 轮提交洪峰中 SIGKILL，
     验证主数据文件永不半写、**已 ack 的提交必已落盘**、重启后计数自洽无重复
+  - **T9 明细导出**：JSON/CSV（含 BOM 与 RFC4180 转义）内容逐项核对、
+    多选合并/文本原样、空结果可识别（`empty:true` / `X-Export-Empty` / 仅表头）、
+    格式协商、权限拒绝、导出后统计与一次性约束不变
 
 ## 目录结构
 
@@ -164,7 +184,8 @@ event-survey/
 │   ├── config.js                # 环境变量配置
 │   ├── store.js                 # JSON 文件存储（内存缓存 + 原子写落盘）
 │   ├── auth.js                  # HMAC 令牌签发/校验、密码哈希
-│   ├── http-util.js             # JSON 收发、鉴权、错误对象、SPA 托管
+│   ├── http-util.js             # JSON 收发、鉴权、错误对象、CSV 下载、SPA 托管
+│   ├── csv.js                   # RFC4180 CSV 序列化（含 UTF-8 BOM）
 │   ├── util.js
 │   ├── seed.js                  # 演示数据
 │   ├── routes.js                # 全部 API 路由
@@ -179,7 +200,7 @@ event-survey/
 │   └── app.js                   # hash 路由 + 所有页面（列表/编辑器/问卷/结果看板）
 └── test/
     ├── smoke.js                 # 端到端冒烟测试
-    └── suite.js                 # 可重复测试套件（8 组，独立判定）
+    └── suite.js                 # 可重复测试套件（9 组，独立判定）
 ```
 
 ## 说明与边界

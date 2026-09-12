@@ -102,20 +102,31 @@ async function startServer(dir) {
 
 // ---------- HTTP ----------
 
-async function call(base, method, url, { token, body } = {}) {
+async function call(base, method, url, { token, body, accept } = {}) {
   try {
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(accept ? { Accept: accept } : {}),
+    };
     const res = await fetch(`${base}${url}`, {
       method,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
+      headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     const text = await res.text();
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { /* 非 JSON */ }
-    return { status: res.status, json, text, error: null };
+    return {
+      status: res.status,
+      json,
+      text,
+      error: null,
+      contentType: res.headers.get('content-type') || '',
+      disposition: res.headers.get('content-disposition') || '',
+      emptyHeader: res.headers.get('x-export-empty'),
+      countHeader: res.headers.get('x-export-count'),
+    };
   } catch (e) {
     return { status: 0, json: null, text: '', error: e.message };
   }
@@ -736,6 +747,186 @@ group('T8 异常中断：临时文件处理与 SIGKILL 崩溃', async (w, check)
   const finalBoard = (await w.call('GET', `/api/events/${eventId}/results`, { token: org.token })).json.data;
   check('基线活动数据三轮崩溃后保持完好（提交人数 4）', finalBoard.submissionCount === 4,
     `实际 ${finalBoard.submissionCount}`);
+});
+
+// ---------- T9 提交明细导出 ----------
+
+// 最小 RFC4180 CSV 解析（支持引号转义与字段内换行），返回行数组（每行是字段数组）
+function parseCsv(text) {
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1); // 去 BOM
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      row.push(field); field = '';
+    } else if (c === '\r') {
+      // 与 \n 配合处理
+    } else if (c === '\n') {
+      row.push(field); rows.push(row); row = []; field = '';
+    } else {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+group('T9 提交明细导出（JSON/CSV、空结果、权限）', async (w, check) => {
+  const org = await w.signup('organizer');
+  const org2 = await w.signup('organizer');
+  const u1 = await w.signup('participant', 'u');
+  const u2 = await w.signup('participant', 'u');
+  const outsider = await w.signup('participant', 'u');
+
+  const created = await w.call('POST', '/api/events', { token: org.token, body: {
+    title: '导出测试,沙龙',
+    questions: [
+      { type: 'single', title: '评分', required: true, options: ['好,很好', '一般', '差'] },
+      { type: 'multi', title: '亮点（多选）', required: false, options: ['内容', '讲师"大牛"', '茶歇'] },
+      { type: 'text', title: '建议（含逗号,引号"换行）', required: false },
+    ],
+  } });
+  const eventId = created.json.data.id;
+  await w.call('POST', `/api/events/${eventId}/publish`, { token: org.token });
+  const ev = (await w.call('GET', `/api/events/${eventId}`, { token: org.token })).json.data;
+  const [qSingle, qMulti, qText] = ev.questions;
+
+  for (const u of [u1, u2]) {
+    await w.call('POST', `/api/events/${eventId}/register`, { token: u.token });
+  }
+  const text1 = '组织很好，下次多办\n第二行：加点「实操」';
+  const text2 = '纯文本,带逗号; 和分号';
+  await w.call('POST', `/api/events/${eventId}/submissions`, {
+    token: u1.token,
+    body: { answers: {
+      [qSingle.id]: qSingle.options[0].id,
+      [qMulti.id]: [qMulti.options[0].id, qMulti.options[2].id],
+      [qText.id]: text1,
+    } },
+  });
+  await w.call('POST', `/api/events/${eventId}/submissions`, {
+    token: u2.token,
+    body: { answers: {
+      [qSingle.id]: qSingle.options[1].id,
+      [qMulti.id]: [],
+      [qText.id]: text2,
+    } },
+  });
+
+  // ---- JSON 导出 ----
+  const j = await w.call('GET', `/api/events/${eventId}/export`, { token: org.token });
+  check('JSON 导出 200', j.status === 200, j.text);
+  check('Content-Type 为 JSON', j.contentType.includes('application/json'));
+  check('empty=false / count=2', j.json.data.empty === false && j.json.data.count === 2);
+  check('X-Export-Empty 头为 0', j.emptyHeader === '0');
+  check('包含活动与题目元信息',
+    j.json.data.event.id === eventId && j.json.data.questions.length === 3);
+
+  const [row1, row2] = j.json.data.submissions;
+  check('明细含提交时间（ISO 字符串）',
+    typeof row1.submittedAt === 'string' && !Number.isNaN(Date.parse(row1.submittedAt)));
+  check('明细含提交人昵称', row1.nickname === u1.user.nickname && row2.nickname === u2.user.nickname);
+  check('按提交时间升序', row1.submittedAt <= row2.submittedAt);
+  check('每题答案齐全（3 题）', row1.answers.length === 3);
+  check('单选保留结构化选项 id',
+    row1.answers[0].value === qSingle.options[0].id && row1.answers[0].text === '好,很好');
+  check('多选 value 为选项 id 数组、text 以「; 」合并',
+    JSON.stringify(row1.answers[1].value) === JSON.stringify([qMulti.options[0].id, qMulti.options[2].id]) &&
+    row1.answers[1].text === '内容; 茶歇');
+  check('空多选 value 为空数组、text 为空串',
+    Array.isArray(row2.answers[1].value) && row2.answers[1].value.length === 0 && row2.answers[1].text === '');
+  check('文本答案原样保留（含换行）', row1.answers[2].value === text1 && row1.answers[2].text === text1);
+  check('文本中的逗号/分号原样保留', row2.answers[2].value === text2);
+
+  // ---- CSV 导出（format=csv）----
+  const c = await w.call('GET', `/api/events/${eventId}/export?format=csv`, { token: org.token });
+  check('CSV 导出 200 且 Content-Type 为 text/csv', c.status === 200 && c.contentType.startsWith('text/csv'));
+  check('含附件下载头并带文件名', c.disposition.includes('attachment') && c.disposition.includes('.csv'));
+  check('X-Export-Count 头为 2', c.countHeader === '2');
+  // 注意：fetch().text() 的 UTF-8 解码会剥掉 BOM，需直接读响应字节验证
+  const rawCsv = await fetch(`${w.base}/api/events/${eventId}/export?format=csv`, {
+    headers: { Authorization: `Bearer ${org.token}` },
+  }).then((r) => r.arrayBuffer());
+  const bytes = Buffer.from(rawCsv);
+  check('输出含 UTF-8 BOM（EF BB BF）', bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf);
+
+  const rows = parseCsv(c.text);
+  check('CSV 共 3 行（表头 + 2 条提交）', rows.length === 3, `实际 ${rows.length}`);
+  check('表头为提交时间/提交人/提交ID + 各题标题',
+    JSON.stringify(rows[0].slice(0, 3)) === JSON.stringify(['提交时间', '提交人', '提交ID']) &&
+    rows[0][3] === '评分' && rows[0][4] === '亮点（多选）' && rows[0][5] === '建议（含逗号,引号"换行）');
+  const data1 = rows[1];
+  check('CSV 单选为选项文本（含逗号正确转义）', data1[3] === '好,很好');
+  check('CSV 多选合并显示「内容; 茶歇」', data1[4] === '内容; 茶歇');
+  check('CSV 文本换行原样保留在单元格内', data1[5] === text1);
+  check('CSV 提交时间与 JSON 一致', data1[0] === row1.submittedAt && data1[1] === row1.nickname);
+  check('第二条空多选单元格为空', rows[2][4] === '');
+
+  // 格式协商：无参数默认 JSON；Accept: text/csv 返回 CSV
+  const viaAccept = await w.call('GET', `/api/events/${eventId}/export`, { token: org.token, accept: 'text/csv' });
+  check('Accept: text/csv 协商返回 CSV', viaAccept.status === 200 && viaAccept.contentType.startsWith('text/csv'));
+  const defaultJson = await w.call('GET', `/api/events/${eventId}/export`, { token: org.token });
+  check('无 format 参数默认返回 JSON', defaultJson.contentType.includes('application/json'));
+
+  // ---- 空结果 ----
+  const emptyEvent = await w.call('POST', '/api/events', { token: org.token, body: {
+    title: '无人提交的活动', questions: STANDARD_QUESTIONS,
+  } });
+  const emptyId = emptyEvent.json.data.id;
+  await w.call('POST', `/api/events/${emptyId}/publish`, { token: org.token });
+  // 有人报名但无人提交
+  await w.call('POST', `/api/events/${emptyId}/register`, { token: outsider.token });
+
+  const ej = await w.call('GET', `/api/events/${emptyId}/export`, { token: org.token });
+  check('空结果 JSON 200 且 empty=true / count=0',
+    ej.status === 200 && ej.json.data.empty === true && ej.json.data.count === 0 &&
+    Array.isArray(ej.json.data.submissions) && ej.json.data.submissions.length === 0);
+  check('空结果 X-Export-Empty 头为 1', ej.emptyHeader === '1');
+
+  const ec = await w.call('GET', `/api/events/${emptyId}/export?format=csv`, { token: org.token });
+  check('空结果 CSV 200', ec.status === 200 && ec.contentType.startsWith('text/csv'));
+  check('空结果 X-Export-Empty 头为 1', ec.emptyHeader === '1');
+  const emptyRows = parseCsv(ec.text);
+  check('空结果 CSV 只有表头一行', emptyRows.length === 1 && emptyRows[0].length === 6);
+
+  // ---- 权限与不存在的活动 ----
+  check('未登录导出返回 401',
+    (await w.call('GET', `/api/events/${eventId}/export`)).status === 401);
+  check('参与者导出返回 403',
+    (await w.call('GET', `/api/events/${eventId}/export`, { token: u1.token })).status === 403);
+  check('其他组织者导出别人的活动返回 403',
+    (await w.call('GET', `/api/events/${eventId}/export`, { token: org2.token })).status === 403);
+  check('其他组织者看 CSV 同样 403',
+    (await w.call('GET', `/api/events/${eventId}/export?format=csv`, { token: org2.token })).status === 403);
+  check('不存在的活动返回 404',
+    (await w.call('GET', '/api/events/evt_not_exist/export', { token: org.token })).status === 404);
+
+  // ---- 导出不改变任何业务状态 ----
+  const board = (await w.call('GET', `/api/events/${eventId}/results`, { token: org.token })).json.data;
+  check('导出后统计不变（报名 2 / 提交 2）', board.registeredCount === 2 && board.submissionCount === 2);
+  check('已提交用户仍不能重复提交',
+    (await w.call('POST', `/api/events/${eventId}/submissions`, {
+      token: u1.token,
+      body: { answers: { [qSingle.id]: qSingle.options[2].id, [qMulti.id]: [], [qText.id]: '' } },
+    })).status === 409);
+  const emptyDetail = (await w.call('GET', `/api/events/${emptyId}`, { token: org.token })).json.data;
+  const realSubmit = await w.call('POST', `/api/events/${emptyId}/submissions`, {
+    token: outsider.token,
+    body: { answers: { [emptyDetail.questions[0].id]: emptyDetail.questions[0].options[0].id } },
+  });
+  check('空结果活动在真实提交后导出变为 1 条',
+    realSubmit.status === 200 &&
+    (await w.call('GET', `/api/events/${emptyId}/export`, { token: org.token })).json.data.count === 1);
 });
 
 // ---------- 主流程 ----------
