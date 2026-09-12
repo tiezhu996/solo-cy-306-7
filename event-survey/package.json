@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node src/server.js",
     "seed": "node src/seed.js",
-    "test": "node test/smoke.js"
+    "test": "node test/smoke.js && node test/suite.js",
+    "test:smoke": "node test/smoke.js",
+    "test:suite": "node test/suite.js"
   },
   "engines": {
     "node": ">=18"
