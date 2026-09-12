@@ -118,6 +118,10 @@ PORT=8080 HOST=127.0.0.1 DATA_DIR=/var/lib/event-survey npm start
 - 加 `?format=csv`（或请求头 `Accept: text/csv`）返回 CSV 文件下载：
   `Content-Type: text/csv; charset=utf-8`、`Content-Disposition: attachment`、
   带 UTF-8 BOM（Excel 打开中文不乱码）、符合 RFC 4180 转义；无提交时文件**只含表头一行**。
+- **公式注入防护**：任何以 `=` `+` `-` `@`（或 Tab/CR）开头的单元格（含活动标题、
+  题目标题、选项文本、昵称、文本/选择答案）都会在 CSV 中前置一个单引号，
+  防止被 Excel/LibreOffice 当作公式执行；去掉首字符即还原原文，
+  引号、逗号、换行与中文均保留。**JSON 导出不做此处理，内容逐字原样。**
 - 前端结果看板提供「导出 CSV」「导出 JSON」按钮（带鉴权头下载，空结果会提示）。
 - 导出为只读操作：不改变提交、统计与一次性约束；权限与结果看板一致
   （未登录 401、非组织者/他人活动 403、活动不存在 404）。
@@ -145,7 +149,7 @@ PORT=8080 HOST=127.0.0.1 DATA_DIR=/var/lib/event-survey npm start
 ```bash
 npm test          # 冒烟测试 + 可重复测试套件（任一失败即非零退出）
 npm run test:smoke # 仅冒烟测试（test/smoke.js，60 项断言）
-npm run test:suite # 仅可重复测试套件（test/suite.js，9 组 151 项断言）
+npm run test:suite # 仅可重复测试套件（test/suite.js，10 组 186 项断言）
 ONLY=T7 npm run test:suite   # 按组名过滤，只跑某一组
 ```
 
@@ -166,6 +170,9 @@ ONLY=T7 npm run test:suite   # 按组名过滤，只跑某一组
   - **T9 明细导出**：JSON/CSV（含 BOM 与 RFC4180 转义）内容逐项核对、
     多选合并/文本原样、空结果可识别（`empty:true` / `X-Export-Empty` / 仅表头）、
     格式协商、权限拒绝、导出后统计与一次性约束不变
+  - **T10 CSV 公式注入防护**：标题/题目/选项/昵称/答案以 `= + - @ Tab CR`
+    开头时 CSV 统一前置单引号（含与引号/逗号/换行叠加场景），全表无漏网单元格；
+    JSON 导出逐字原样；统计、提交、权限不变
 
 ## 目录结构
 
@@ -185,7 +192,7 @@ event-survey/
 │   ├── store.js                 # JSON 文件存储（内存缓存 + 原子写落盘）
 │   ├── auth.js                  # HMAC 令牌签发/校验、密码哈希
 │   ├── http-util.js             # JSON 收发、鉴权、错误对象、CSV 下载、SPA 托管
-│   ├── csv.js                   # RFC4180 CSV 序列化（含 UTF-8 BOM）
+│   ├── csv.js                   # RFC4180 CSV 序列化（UTF-8 BOM + 公式注入防护）
 │   ├── util.js
 │   ├── seed.js                  # 演示数据
 │   ├── routes.js                # 全部 API 路由
@@ -200,7 +207,7 @@ event-survey/
 │   └── app.js                   # hash 路由 + 所有页面（列表/编辑器/问卷/结果看板）
 └── test/
     ├── smoke.js                 # 端到端冒烟测试
-    └── suite.js                 # 可重复测试套件（9 组，独立判定）
+    └── suite.js                 # 可重复测试套件（10 组，独立判定）
 ```
 
 ## 说明与边界

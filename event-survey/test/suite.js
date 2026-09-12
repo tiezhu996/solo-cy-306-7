@@ -929,6 +929,138 @@ group('T9 提交明细导出（JSON/CSV、空结果、权限）', async (w, chec
     (await w.call('GET', `/api/events/${emptyId}/export`, { token: org.token })).json.data.count === 1);
 });
 
+// ---------- T10 CSV 公式注入防护 ----------
+
+group('T10 导出 CSV 公式注入防护', async (w, check) => {
+  // 直接对防护函数做单元级检查（不依赖网络）
+  const { sanitizeFormula, escapeCell } = require(path.join(__dirname, '..', 'src', 'csv'));
+  for (const lead of ['=', '+', '-', '@', '\t', '\r']) {
+    check(`sanitizeFormula 对「${lead === '\t' ? 'Tab' : lead === '\r' ? 'CR' : lead}」开头加单引号`,
+      sanitizeFormula(`${lead}x`) === `'${lead}x`);
+  }
+  check('普通中文/英文不加引号', sanitizeFormula('普通文本') === '普通文本' && sanitizeFormula('abc') === 'abc');
+  check('等号在中间不处理（a=b）', sanitizeFormula('a=b') === 'a=b');
+  check('前导空格后接等号不处理', sanitizeFormula('  =x') === '  =x');
+  check('空串保持空串', sanitizeFormula('') === '');
+  check('公式开头 + 逗号时同时做安全前缀与 RFC 引号转义',
+    escapeCell('=a,b') === `"'=a,b"`);
+  check('公式开头 + 内部双引号时正确转义',
+    escapeCell('=HYPERLINK("x")') === `"'=HYPERLINK(""x"")"`);
+
+  // 端到端：题目、选项、昵称、文本答案、活动标题都可能以触发符开头
+  const org = await w.signup('organizer');
+  const evilNick = await w.signup('participant', 'u'); // 注册后改不了昵称，直接用带触发符的昵称注册
+  // signup 用 username 当昵称；重新走注册接口构造自定义昵称
+  const tag = crypto.randomBytes(3).toString('hex');
+  const u1Reg = await w.call('POST', '/api/auth/register', { body: {
+    username: `evil${tag}`, password: 'Pass@1234', nickname: '=张三注入', role: 'participant',
+  } });
+  check('公式开头昵称可注册', u1Reg.status === 200);
+  const u1 = u1Reg.json.data;
+  const u2 = evilNick;
+
+  const dangerousSingle = ['=1+1', "+cmd|' /C calc'!A1", '-2+3', '@SUM(A1)', '普通选项'];
+  const dangerousMulti = ['=HYPERLINK("http://evil","x")', '+多选加号', '-多选减号', '@多选艾特'];
+  const created = await w.call('POST', '/api/events', { token: org.token, body: {
+    title: '=公式注入测试活动',
+    questions: [
+      { type: 'single', title: '评分', required: true, options: dangerousSingle },
+      { type: 'multi', title: '多选', required: false, options: dangerousMulti },
+      { type: 'text', title: '=请输入建议（公式开头的题目标题）', required: true },
+    ],
+  } });
+  const eventId = created.json.data.id;
+  await w.call('POST', `/api/events/${eventId}/publish`, { token: org.token });
+  const ev = (await w.call('GET', `/api/events/${eventId}`, { token: org.token })).json.data;
+  const [qSingle, qMulti, qText] = ev.questions;
+  await w.call('POST', `/api/events/${eventId}/register`, { token: u1.token });
+  await w.call('POST', `/api/events/${eventId}/register`, { token: u2.token });
+
+  const optIdByLabel = (q, label) => q.options.find((o) => o.label === label).id;
+  const textPayload1 = '=HYPERLINK("http://evil.example","点我"),第二行\n第三行';
+  const textPayload2 = "+cmd|'/C calc'!A0";
+
+  const s1 = await w.call('POST', `/api/events/${eventId}/submissions`, {
+    token: u1.token,
+    body: { answers: {
+      [qSingle.id]: optIdByLabel(qSingle, '=1+1'),
+      [qMulti.id]: [optIdByLabel(qMulti, '=HYPERLINK("http://evil","x")'), optIdByLabel(qMulti, '@多选艾特')],
+      [qText.id]: textPayload1,
+    } },
+  });
+  const s2 = await w.call('POST', `/api/events/${eventId}/submissions`, {
+    token: u2.token,
+    body: { answers: {
+      [qSingle.id]: optIdByLabel(qSingle, "+cmd|' /C calc'!A1"),
+      [qMulti.id]: [optIdByLabel(qMulti, '-多选减号'), optIdByLabel(qMulti, '+多选加号')],
+      [qText.id]: textPayload2,
+    } },
+  });
+  check('两份含公式负载的提交成功', s1.status === 200 && s2.status === 200, `${s1.status} ${s2.status}`);
+
+  // ---- CSV：所有以触发符开头的单元格都必须前置单引号 ----
+  const c = await w.call('GET', `/api/events/${eventId}/export?format=csv`, { token: org.token });
+  check('CSV 导出 200', c.status === 200);
+  const rows = parseCsv(c.text);
+  check('CSV 共 3 行', rows.length === 3);
+
+  const TRIGGERS = new Set(['=', '+', '-', '@']);
+  const startsWithTrigger = (s) => s.length > 0 && TRIGGERS.has(s[0]);
+
+  // 全表扫描：除固定表头外，任何单元格都不允许以触发符开头
+  let unguarded = [];
+  rows.forEach((row, ri) => row.forEach((cell, ci) => {
+    if (startsWithTrigger(cell)) unguarded.push(`r${ri}c${ci}=${JSON.stringify(cell.slice(0, 20))}`);
+  }));
+  check('CSV 中没有任何单元格以 =/+/-/@ 开头（全部已加安全前缀）',
+    unguarded.length === 0, unguarded.join('; '));
+
+  const header = rows[0];
+  check('公式开头的题目标题被安全化', header[5] === `'=请输入建议（公式开头的题目标题）`);
+  check('固定表头不被误加前缀', header.slice(0, 3).join('|') === '提交时间|提交人|提交ID');
+
+  // 按时间升序定位两行
+  const rowByNick = Object.fromEntries(rows.slice(1).map((r) => [r[1], r]));
+  const r1 = rowByNick[`'=张三注入`];
+  const r2 = rowByNick[u2.user.nickname];
+  check('公式开头的昵称被安全化且能定位到行', Boolean(r1));
+  check('普通昵称不被误加前缀', r2 && r2[1] === u2.user.nickname && !r2[1].startsWith("'"));
+  check('单选危险选项文本被安全化',
+    r1[3] === `'=1+1` && r2[3] === `'+cmd|' /C calc'!A1`, `r1=${r1 && r1[3]} r2=${r2 && r2[3]}`);
+  check('多选合并后整体以安全前缀开头且保留两个选项',
+    r1[4] === `'=HYPERLINK("http://evil","x"); @多选艾特` &&
+    r2[4] === `'-多选减号; +多选加号`,
+    `r1=${r1 && r1[4]} r2=${r2 && r2[4]}`);
+  check('文本答案原样保留（仅多一个前导单引号，逗号/引号/换行/中文不丢）',
+    r1[5] === `'${textPayload1}` && r2[5] === `'${textPayload2}`);
+  check('安全前缀只是前导字符：去掉后与原始答案完全一致',
+    r1[5].slice(1) === textPayload1 && r2[5].slice(1) === textPayload2);
+
+  // ---- JSON 导出必须保持原样（不做 CSV 安全化） ----
+  const j = await w.call('GET', `/api/events/${eventId}/export`, { token: org.token });
+  const findAnswers = (nick) => j.json.data.submissions.find((s) => s.nickname === nick).answers;
+  const a1 = findAnswers('=张三注入');
+  check('JSON 题目标题原样（无前缀）', j.json.data.questions[2].title === '=请输入建议（公式开头的题目标题）');
+  check('JSON 昵称原样（无前缀）', j.json.data.submissions.some((s) => s.nickname === '=张三注入'));
+  check('JSON 单选选项文本原样', a1[0].text === '=1+1');
+  check('JSON 多选合并文本原样', a1[1].text === '=HYPERLINK("http://evil","x"); @多选艾特');
+  check('JSON 文本答案与原始负载逐字一致', a1[2].value === textPayload1);
+  check('JSON 结构化 value 仍是选项 id 数组', Array.isArray(a1[1].value) && a1[1].value.length === 2);
+
+  // ---- 统计、提交、权限不受影响 ----
+  const board = (await w.call('GET', `/api/events/${eventId}/results`, { token: org.token })).json.data;
+  check('统计正常：2 人提交', board.submissionCount === 2);
+  const singleDist = Object.fromEntries(board.questions[0].options.map((o) => [o.label, o.count]));
+  check('危险选项文本的计数正确', singleDist['=1+1'] === 1 && singleDist["+cmd|' /C calc'!A1"] === 1 && singleDist['普通选项'] === 0);
+  check('重复提交仍被拒绝',
+    (await w.call('POST', `/api/events/${eventId}/submissions`, {
+      token: u1.token,
+      body: { answers: { [qSingle.id]: optIdByLabel(qSingle, '=1+1'), [qMulti.id]: [], [qText.id]: 'x' } },
+    })).status === 409);
+  check('参与者仍不能导出（403）',
+    (await w.call('GET', `/api/events/${eventId}/export?format=csv`, { token: u1.token })).status === 403);
+});
+
 // ---------- 主流程 ----------
 
 async function main() {
