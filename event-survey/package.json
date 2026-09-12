@@ -1,0 +1,16 @@
+{
+  "name": "event-survey",
+  "version": "1.0.0",
+  "description": "活动问卷反馈系统：组织者为活动创建单选/多选/文本题问卷，已报名用户在活动发布后提交一次反馈。",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "seed": "node src/seed.js",
+    "test": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
